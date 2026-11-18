@@ -1344,13 +1344,14 @@ fn gvfs_mounts() -> Vec<Place> {
                 continue;
             }
             let raw = e.file_name().to_string_lossy().to_string();
+            let dev = path.to_string_lossy().to_string();
             out.push(Place {
                 kind: PlaceKind::Network,
                 path,
                 name: gvfs_pretty_name(&raw),
-                removable: false,
+                removable: true,
                 hotplug: false,
-                device: String::new(),
+                device: dev,
                 // Never measured: asking a share for its size is a round trip
                 // that can stall for seconds, and the answer would be the
                 // server's free space, not the user's quota on it.
@@ -1573,7 +1574,7 @@ fn volume_place(row: &BlockRow, kind: PlaceKind) -> Place {
 /// and a session without that variable left the signature blind to a mount
 /// appearing — the sidebar then never refreshed on its own.
 #[cfg(target_os = "linux")]
-fn gvfs_root() -> PathBuf {
+pub(crate) fn gvfs_root() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty());
     gvfs_root_in(runtime.as_deref().map(Path::new), unsafe { libc_getuid() })
 }

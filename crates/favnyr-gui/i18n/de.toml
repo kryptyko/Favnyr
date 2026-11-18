@@ -414,6 +414,7 @@ mount_failed_detail = "Dieses Laufwerk konnte nicht eingebunden werden: {detail}
 mount_platform_unsupported = "Einbinden wird auf diesem System nicht unterstützt."
 sidebar_network = "Netzwerk"
 net_ejected = "Gerät entfernt — kann abgezogen werden"
+net_connecting = "Verbindung zum Netzwerkort wird hergestellt..."
 net_disconnected = "Netzlaufwerk getrennt"
 net_eject_failed = "Auswerfen fehlgeschlagen"
 eject_unknown_device = "Unbekanntes Gerät."

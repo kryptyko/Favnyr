@@ -460,6 +460,7 @@ mount_failed_detail = "Не удалось примонтировать этот
 mount_platform_unsupported = "Монтирование не поддерживается в этой системе."
 sidebar_network = "Сеть"
 net_ejected = "Устройство извлечено — можно безопасно отключить"
+net_connecting = "Подключение к сетевому расположению..."
 net_disconnected = "Сетевой диск отключён"
 net_eject_failed = "Сбой извлечения"
 eject_unknown_device = "Неизвестное устройство."

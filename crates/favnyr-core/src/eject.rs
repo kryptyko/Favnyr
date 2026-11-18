@@ -141,10 +141,27 @@ mod imp {
         names
     }
 
-    pub fn disconnect(_device: &str) -> Result<(), EjectError> {
-        // Linux network shares are unmounted via GVFS/gio or the admin;
-        // not covered in v1 (browsing only).
-        Err(EjectError::LinuxNetworkDisconnectUnsupported)
+    pub fn disconnect(device: &str) -> Result<(), EjectError> {
+        let output = Command::new("gio")
+            .env("LC_ALL", "C")
+            .args(["mount", "-u", device])
+            .output()
+            .map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => EjectError::ToolNotFound,
+                _ => EjectError::ToolFailed {
+                    bin: "gio",
+                    detail: None,
+                },
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(EjectError::ToolFailed {
+                bin: "gio",
+                detail: (!detail.is_empty()).then(|| detail),
+            })
+        }
     }
 
     enum RunErr {

@@ -53,10 +53,46 @@ pub fn mount(device: &str) -> Result<PathBuf, MountError> {
     }
 }
 
+/// Mounts a network URI (e.g. `sftp://...`, `smb://...`) via the desktop's GVFS (Linux)
+/// or translates to UNC (Windows) and returns the local path where it landed. Blocking.
+pub fn mount_uri(uri: &str) -> Result<PathBuf, MountError> {
+    #[cfg(target_os = "linux")]
+    {
+        imp::mount_uri(uri)
+    }
+    #[cfg(windows)]
+    {
+        imp_windows::mount_uri(uri)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = uri;
+        Err(MountError::PlatformUnsupported)
+    }
+}
+
+#[cfg(windows)]
+mod imp_windows {
+    use super::{MountError, PathBuf};
+
+    pub fn mount_uri(uri: &str) -> Result<PathBuf, MountError> {
+        let uri = crate::fs::normalize_network_uri(uri);
+        if let Some(rest) = uri.strip_prefix("smb://") {
+            let trimmed = rest.trim_start_matches('/');
+            let unc = format!(r"\\{}", trimmed.replace('/', r"\"));
+            Ok(PathBuf::from(unc))
+        } else {
+            Err(MountError::PlatformUnsupported)
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{MountError, PathBuf};
     use std::process::Command;
+
+    const MOUNT_HELPER_SCRIPT: &str = include_str!("mount_helper.py");
 
     pub fn mount(device: &str) -> Result<MountPoint, MountError> {
         if device.trim().is_empty() {
@@ -79,6 +115,147 @@ mod imp {
         parse_mount_point(&String::from_utf8_lossy(&output.stdout)).ok_or(MountError::NoMountPoint)
     }
 
+    pub fn mount_uri(uri: &str) -> Result<PathBuf, MountError> {
+        let uri = crate::fs::normalize_network_uri(uri);
+        if uri.is_empty() {
+            return Err(MountError::UnknownDevice);
+        }
+
+        // 1. Check if already mounted and resolve path
+        if let Some(path) = query_gio_local_path(&uri) {
+            return Ok(path);
+        }
+        if let Some(path) = resolve_from_gvfs_root(&uri) {
+            return Ok(path);
+        }
+
+        // 2. Try native GTK/GVFS helper with GUI authentication support
+        if let Some(path) = mount_via_gtk_helper(&uri)? {
+            return Ok(path);
+        }
+
+        // 3. Fallback: invoke gio mount CLI
+        let output = Command::new("gio")
+            .env("LC_ALL", "C")
+            .args(["mount", &uri])
+            .output()
+            .map_err(|err| match err.kind() {
+                std::io::ErrorKind::NotFound => MountError::ToolNotFound,
+                _ => MountError::ToolFailed { detail: None },
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let err_combined = if stderr.trim().is_empty() {
+                stdout.to_string()
+            } else {
+                stderr.to_string()
+            };
+
+            if !err_combined.contains("AlreadyMounted")
+                && !err_combined.contains("already mounted")
+                && !err_combined.contains("ya está montad")
+            {
+                return Err(classify_failure(&err_combined));
+            }
+        }
+
+        // 4. Resolve local path via gio info
+        if let Some(path) = query_gio_local_path(&uri) {
+            return Ok(path);
+        }
+
+        // 5. Fallback: check gvfs root directory
+        if let Some(path) = resolve_from_gvfs_root(&uri) {
+            return Ok(path);
+        }
+
+        Err(MountError::NoMountPoint)
+    }
+
+    fn mount_via_gtk_helper(uri: &str) -> Result<Option<PathBuf>, MountError> {
+        let child = Command::new("python3")
+            .args(["-c", MOUNT_HELPER_SCRIPT, uri])
+            .output();
+
+        let output = match child {
+            Ok(out) => out,
+            Err(_) => return Ok(None), // python3 not installed, continue to fallback
+        };
+
+        if output.status.success() {
+            let out_str = String::from_utf8_lossy(&output.stdout);
+            let p = out_str.trim();
+            if !p.is_empty() {
+                return Ok(Some(PathBuf::from(p)));
+            }
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("NO_PYGTK") || stderr.contains("NO_DISPLAY") {
+            return Ok(None); // PyGTK or display missing, continue to gio fallback
+        }
+
+        // If helper failed with auth rejection or cancellation, return the error
+        Err(classify_failure(&stderr))
+    }
+
+    fn query_gio_local_path(uri: &str) -> Option<PathBuf> {
+        let output = Command::new("gio")
+            .env("LC_ALL", "C")
+            .args(["info", uri])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            parse_local_path_from_gio_info(&String::from_utf8_lossy(&output.stdout))
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn parse_local_path_from_gio_info(stdout: &str) -> Option<PathBuf> {
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("local path:") {
+                let p = rest.trim();
+                if !p.is_empty() {
+                    return Some(PathBuf::from(p));
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("ruta local:") {
+                let p = rest.trim();
+                if !p.is_empty() {
+                    return Some(PathBuf::from(p));
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve_from_gvfs_root(uri: &str) -> Option<PathBuf> {
+        let gvfs = crate::places::gvfs_root();
+        let rd = std::fs::read_dir(&gvfs).ok()?;
+        let after_scheme = uri.split("://").nth(1)?;
+        let host_candidate = after_scheme
+            .split(&['/', ':', '@'][..])
+            .find(|s| !s.is_empty())?;
+
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(host_candidate) {
+                let mut mount_dir = entry.path();
+                if let Some(pos) = after_scheme.find('/') {
+                    let subpath = after_scheme[pos..].trim_start_matches('/');
+                    if !subpath.is_empty() {
+                        mount_dir.push(subpath);
+                    }
+                }
+                return Some(mount_dir);
+            }
+        }
+        None
+    }
+
     type MountPoint = PathBuf;
 
     /// Reads the mount point out of a success line, which reads
@@ -96,10 +273,20 @@ mod imp {
     /// Sorts a failure by the D-Bus error name the daemon reports. Those names
     /// are stable and language-independent, unlike the sentence beside them.
     pub(super) fn classify_failure(stderr: &str) -> MountError {
-        if stderr.contains("NotAuthorized") {
+        if stderr.contains("NotAuthorized")
+            || stderr.contains("Permission denied")
+            || stderr.contains("rechaz")
+            || stderr.contains("cancel")
+            || stderr.contains("Cancel")
+            || stderr.contains("Autenticación")
+            || stderr.contains("Password")
+        {
             return MountError::NotAuthorized;
         }
-        if stderr.contains("AlreadyMounted") {
+        if stderr.contains("AlreadyMounted")
+            || stderr.contains("already mounted")
+            || stderr.contains("ya está montad")
+        {
             return MountError::AlreadyMounted;
         }
         let detail = stderr.trim();
@@ -112,8 +299,25 @@ mod imp {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::MountError;
-    use super::imp::{classify_failure, parse_mount_point};
+    use super::imp::{classify_failure, parse_local_path_from_gio_info, parse_mount_point};
     use std::path::PathBuf;
+
+    #[test]
+    fn local_path_is_parsed_from_gio_info() {
+        let sample = "display name: foo\nlocal path: /run/user/1000/gvfs/sftp:host=10.0.0.11\nuri: sftp://...";
+        assert_eq!(
+            parse_local_path_from_gio_info(sample),
+            Some(PathBuf::from("/run/user/1000/gvfs/sftp:host=10.0.0.11"))
+        );
+
+        let sample_es = "nombre: foo\nruta local: /run/user/1000/gvfs/smb-share:server=nas\n";
+        assert_eq!(
+            parse_local_path_from_gio_info(sample_es),
+            Some(PathBuf::from("/run/user/1000/gvfs/smb-share:server=nas"))
+        );
+
+        assert_eq!(parse_local_path_from_gio_info(""), None);
+    }
 
     #[test]
     fn the_mount_point_is_read_from_the_success_line() {

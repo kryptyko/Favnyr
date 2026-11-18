@@ -3141,6 +3141,29 @@ pub fn install(window: &MainWindow, state: AppState) {
         let weak = window.as_weak();
         window.on_navigate_to(move |path: SharedString| {
             let Some(w) = weak.upgrade() else { return };
+            let raw_str = path.as_str().trim();
+            if favnyr_core::fs::is_network_uri(raw_str) {
+                let uri = raw_str.to_string();
+                let lang = st.config.borrow().language;
+                let weak_window = w.as_weak();
+                notice(&w, i18n::tr(lang, "net_connecting"), NoticeKind::FavExists);
+                std::thread::spawn(move || {
+                    let outcome = favnyr_core::mount::mount_uri(&uri);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(w) = weak_window.upgrade() else { return };
+                        match outcome {
+                            Ok(local_path) => {
+                                w.invoke_sidebar_refresh();
+                                w.invoke_navigate_to(local_path.display().to_string().into());
+                            }
+                            Err(err) => {
+                                show_notice_unavailable(&w, i18n::mount_error_message(lang, &err));
+                            }
+                        }
+                    });
+                });
+                return;
+            }
             // `~` for the home folder, and the environment variables written
             // the way this platform writes them. The rule lives in the core,
             // where it is testable without a window; an address that expands to

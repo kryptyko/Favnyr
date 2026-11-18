@@ -460,6 +460,7 @@ mount_failed_detail = "このボリュームをマウントできませんでし
 mount_platform_unsupported = "このシステムではマウントに対応していません。"
 sidebar_network = "ネットワーク"
 net_ejected = "デバイスを取り外しました。安全に抜けます"
+net_connecting = "ネットワークの場所に接続しています..."
 net_disconnected = "ネットワークドライブを切断しました"
 net_eject_failed = "取り外しに失敗しました"
 eject_unknown_device = "不明なデバイスです。"

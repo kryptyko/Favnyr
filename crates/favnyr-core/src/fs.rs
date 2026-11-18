@@ -271,6 +271,32 @@ pub fn is_unc_path(path: &Path) -> bool {
     }
 }
 
+/// Checks whether `raw` is a remote network URI (e.g. `sftp://...`, `smb://...`).
+pub fn is_network_uri(raw: &str) -> bool {
+    let s = raw.trim();
+    s.starts_with("sftp://")
+        || s.starts_with("smb://")
+        || s.starts_with("ftp://")
+        || s.starts_with("ftps://")
+        || s.starts_with("ssh://")
+        || s.starts_with("cifs://")
+        || s.starts_with("dav://")
+        || s.starts_with("davs://")
+        || s.starts_with("nfs://")
+}
+
+/// Normalizes network URI schemes (e.g. `ssh://` -> `sftp://`, `cifs://` -> `smb://`).
+pub fn normalize_network_uri(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix("ssh://") {
+        format!("sftp://{rest}")
+    } else if let Some(rest) = s.strip_prefix("cifs://") {
+        format!("smb://{rest}")
+    } else {
+        s.to_string()
+    }
+}
+
 // ---------- What the user types in the address bar ----------
 
 /// Turns an address typed by the user into a path.
@@ -1373,6 +1399,31 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn network_uris_are_detected_and_normalized() {
+        assert!(is_network_uri("sftp://user@host/path"));
+        assert!(is_network_uri("smb://server/share"));
+        assert!(is_network_uri("ssh://user@host"));
+        assert!(is_network_uri("cifs://server/share"));
+        assert!(is_network_uri("ftp://server"));
+        assert!(!is_network_uri("/local/path"));
+        assert!(!is_network_uri("C:\\Windows"));
+        assert!(!is_network_uri("relative/path"));
+
+        assert_eq!(
+            normalize_network_uri("ssh://user@host/path"),
+            "sftp://user@host/path"
+        );
+        assert_eq!(
+            normalize_network_uri("cifs://server/share"),
+            "smb://server/share"
+        );
+        assert_eq!(
+            normalize_network_uri("sftp://user@host"),
+            "sftp://user@host"
+        );
+    }
 
     /// The environment is handed in, so these assert the PARSING rather than
     /// whatever the machine running them happens to define.
